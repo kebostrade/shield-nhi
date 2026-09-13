@@ -1,0 +1,20 @@
+# Build artifacts
+shield-nhi
+shield-nhi-*
+*.exe
+*.test
+*.out
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+credentials*
+
+# Local scratch
+inventory_raw.json
+*.log
+__pycache__/
+.venv/
+venv/
+*.pyc
