@@ -7,7 +7,9 @@ shield-nhi-*
 
 # Secrets — never commit
 .env
-.env.*
+.env.local
+.env.prod
+.env.production
 *.pem
 credentials*
 
