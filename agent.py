@@ -21,6 +21,9 @@ from strands.interventions.actions import Confirm, Deny, Proceed
 # Our SDK-free risk engine (pure logic, unit-testable).
 from nhi_engine import NHI, ScoredNHI, load_inventory, render_report, score_all
 
+# Model layer: Nebius Token Factory (primary, NVIDIA Nemotron) → Bedrock (fallback).
+import nhi_models
+
 # --------------------------------------------------------------------------
 # 1) Strands tools the agent can call
 # --------------------------------------------------------------------------
@@ -49,6 +52,46 @@ def get_nhi(nhi_id: str) -> str:
                 "reasons": r.reasons, "proposed": r.proposed, "approved_id": r.approved_id,
             }, indent=2)
     return f"NHI '{nhi_id}' not found."
+
+
+# READ-ONLY tool — makes a direct runtime call to Nebius Token Factory (NVIDIA Nemotron)
+# to explain *why* a finding matters, grounded in the engine's own evidence.
+@tool(description="Explain in plain language WHY one NHI is risky, with the evidence behind "
+                  "it. Read-only. Runs a live inference call on Nebius Token Factory "
+                  "(NVIDIA Nemotron).")
+def explain_risk(nhi_id: str) -> str:
+    record = None
+    for r in score_all():
+        if r.nhi.id == nhi_id:
+            record = r
+            break
+    if record is None:
+        return f"NHI '{nhi_id}' not found."
+
+    evidence = {
+        "id": record.nhi.id, "source": record.nhi.source, "name": record.nhi.name,
+        "scope": record.nhi.scope, "perms": record.nhi.perms, "last_used": record.nhi.last_used,
+        "expires_at": record.nhi.expires_at, "public_leak": record.nhi.public_leak,
+        "hardcoded": record.nhi.hardcoded, "score": record.score, "risk": record.risk,
+        "reasons": record.reasons, "proposed": record.proposed,
+    }
+    if not nhi_models.token_factory_enabled():
+        return ("NEBIUS_API_KEY not set — live explanation unavailable. Deterministic record:\n"
+                + json.dumps(evidence, indent=2, ensure_ascii=False))
+
+    prompt = (
+        "You are an NHI (non-human identity) security analyst. Explain in under 120 words, "
+        "for an on-call engineer, why this machine identity is risky and what the blast "
+        "radius is if it leaks. Quote the concrete evidence fields (perms, last_used, "
+        "public_leak, expires_at). Do not invent facts beyond the evidence.\n\n"
+        f"EVIDENCE:\n{json.dumps(evidence, indent=2, ensure_ascii=False)}"
+    )
+    try:
+        text = nhi_models.chat("reason", [{"role": "user", "content": prompt}])
+        return (f"[served by {nhi_models.model_for('reason')} via Nebius Token Factory]\n\n{text}")
+    except Exception as exc:  # network/key failure must not kill the agent run
+        return (f"Token Factory call failed ({type(exc).__name__}: {exc}). "
+                f"Deterministic record:\n{json.dumps(evidence, indent=2, ensure_ascii=False)}")
 
 
 # DESTRUCTIVE tool — gated by the human-in-the-loop Confirm intervention below.
@@ -105,17 +148,8 @@ class HumanApprovalGate(InterventionHandler):
 # --------------------------------------------------------------------------
 
 def build_agent() -> Agent:
-    model = None
-    if os.environ.get("BEDROCK_API_KEY"):
-        # Bearer-token Bedrock (no AWS creds needed — works anywhere).
-        from strands.models.bedrock import BedrockModel
-        model = BedrockModel(
-            region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            api_key=os.environ["BEDROCK_API_KEY"],
-            model_id=os.environ.get(
-                "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-6"),
-        )
-    # else: model=None -> Strands picks its default (BedrockModel with env creds).
+    # Primary: Nebius Token Factory (NVIDIA Nemotron). Fallback: Bedrock bearer token.
+    model = nhi_models.build_model()
 
     system_prompt = (
         "You are SHIELD-NHI, an operations AI agent that governs Non-Human Identities "
@@ -124,6 +158,7 @@ def build_agent() -> Agent:
         "surface when a REAL decision needs a human.\n\n"
         "Behavior:\n"
         "- Use scan_inventory to see the NHIs, risk_report to rank them.\n"
+        "- Use explain_risk to justify *why* a finding matters, grounded in its evidence.\n"
         "- Summarize the top risks and PROPOSE remediation actions.\n"
         "- For any destructive action you must call `remediate` — Strands will pause you "
         "and ask a human to approve. This is by design: safe-agent-ops.\n"
@@ -132,7 +167,7 @@ def build_agent() -> Agent:
 
     return Agent(
         model=model,
-        tools=[scan_inventory, risk_report, get_nhi, remediate],
+        tools=[scan_inventory, risk_report, get_nhi, explain_risk, remediate],
         system_prompt=system_prompt,
         interventions=[HumanApprovalGate()],
         name="SHIELD-NHI",
@@ -142,10 +177,11 @@ def build_agent() -> Agent:
 
 def main() -> None:
     agent = build_agent()
-    print("SHIELD-NHI :: Strands Agents SDK (human-in-the-loop NHI governance)\n")
+    print("SHIELD-NHI :: Strands Agents SDK (human-in-the-loop NHI governance)")
+    print(f"model provider :: {nhi_models.active_provider()}\n")
     demo = (
         "Scan the inventory and give me a ranked risk report. "
-        "Highlight what is urgent, then remediate the most critical NHI."
+        "Explain why the most critical NHI is dangerous, then remediate it."
     )
     print(f">>> {demo}\n")
     result = agent(demo)

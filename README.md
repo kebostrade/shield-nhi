@@ -1,15 +1,17 @@
 # 🛡️ SHIELD-NHI — Secure Ops Non-Human Identity Governance Agent
 
-**Amazon "Agents for Humans" Hackathon** · Professional Agents track · **$5,000 / $3,000 / $2,000**
+**Nebius × NVIDIA Global AI Hackathon** · **Personal AI** track · built on **Nebius Token Factory**
+*(original entry: Amazon "Agents for Humans" Hackathon, Professional Agents track)*
 
 > *"While every other agent writes your emails, SHIELD-NHI secures the **robots** that run your cloud."*
 
-Built with the **Strands Agents SDK** + **Amazon Bedrock**. An AI agent that discovers, risk-scores,
-and remediates **Non-Human Identities** (service accounts, API keys, cloud IAM roles, workload IDs) —
-and asks a **human** only when a real decision has to be made.
+Built with the **Strands Agents SDK** and **NVIDIA Nemotron open-source models served through
+Nebius Token Factory** — every reasoning step is a runtime call to the Token Factory inference API.
+The agent discovers, risk-scores, and remediates **Non-Human Identities** (service accounts, API
+keys, cloud IAM roles, workload IDs) — and asks a **human** only when a real decision has to be made.
 
 That last part is the entire pitch: **the agent runs autonomously in the background, then surfaces
-when a destructive action needs a human sign-off.** Exactly what "Agents for Humans" asks for.
+when a destructive action needs a human sign-off.** Always-on, private, and read-only by default.
 
 ---
 
@@ -37,11 +39,20 @@ Nobody notices. There is no such thing as a "bored" machine identity — until i
 A **Strands `InterventionHandler`** (`HumanApprovalGate` in `agent.py`) intercepts the destructive
 `remediate` tool:
 
-- **Read-only tools** (`scan_inventory`, `risk_report`, `get_nhi`) → `Proceed()`, runs autonomously.
+- **Read-only tools** (`scan_inventory`, `risk_report`, `get_nhi`, `explain_risk`) → `Proceed()`, runs autonomously.
 - **`remediate`** → `Confirm(...)`: the agent surfaces the decision and **pauses for a human**.
 
 This is safe-agent-ops: the agent takes all the busywork off the SOC analyst's plate, and only
 rings the bell when a real decision matters.
+
+## Evidence-backed reasoning (`explain_risk`)
+
+A finding is only useful if you can audit it. `explain_risk(nhi_id)` takes the engine's own record —
+scope, permissions, `last_used`, `public_leak`, expiry, the rules that fired — and sends it to
+**NVIDIA Nemotron on Nebius Token Factory** for a grounded, plain-language explanation of why the
+identity is dangerous and what the blast radius is. The tool prints the model id that served it,
+and falls back to the deterministic record if the API is unreachable — so a network blip never
+kills a run and never fabricates an answer.
 
 ## How it works (architecture)
 
@@ -53,6 +64,7 @@ rings the bell when a real decision matters.
                     │     scan_inventory   (read-only)             │
                     │     risk_report      (read-only)             │
                     │     get_nhi          (read-only)             │
+                    │     explain_risk     (read-only, live LLM)   │
                     │     remediate        (DESTRUCTIVE)           │
                     │                                              │
                     │   ┌───────────────────────────────────┐      │
@@ -61,7 +73,8 @@ rings the bell when a real decision matters.
                     │   │   remediate → Confirm() ← human   │      │
                     │   └───────────────────────────────────┘      │
                     └───────────┬──────────────────────────────────┘
-                                │ Amazon Bedrock (Claude) — risk reasoning
+                                │ Nebius Token Factory → NVIDIA Nemotron
+                                │ (per-task tiers: Nano / Super / Ultra)
                                 ▼
             AWS IAM │ GitHub │ Kubernetes   (discovery connectors)
 ```
@@ -69,7 +82,11 @@ rings the bell when a real decision matters.
 ## Stack
 
 - **Strands Agents SDK** — agent orchestration, tools, interventions (human-in-the-loop)
-- **Amazon Bedrock** (Claude) — risk reasoning / natural-language ops
+- **Nebius Token Factory** — OpenAI-compatible inference; **every** agent reasoning step is a
+  runtime call to `api.tokenfactory.nebius.com`
+- **NVIDIA Nemotron** (open-source) — risk explanations and ops reasoning, with per-task model
+  tiers (`NEBIUS_MODEL_FAST` / `_REASON` / `_DEEP`)
+- **Amazon Bedrock** — optional fallback provider (bearer token), so the original run path still works
 - **Python 3.11** — agent + risk engine (`nhi_engine.py`, pure logic, unit-testable)
 
 ## Run it
@@ -79,13 +96,30 @@ rings the bell when a real decision matters.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2) Provide Bedrock (bearer-token API key, or AWS creds via boto3 session)
-export BEDROCK_API_KEY=<your-key>          # optional if you have AWS creds
-export AWS_REGION=us-east-1                # or your region
-# optional: export BEDROCK_MODEL_ID=anthropic.claude-sonnet-4-6
+# 2) Provide the primary inference key — Nebius Token Factory
+export NEBIUS_API_KEY=<your-token-factory-key>   # https://tokenfactory.nebius.com/
+# optional overrides:
+# export NEBIUS_MODEL=nvidia/nemotron-3-super-120b-a12b
+# export NEBIUS_MODEL_FAST=...   NEBIUS_MODEL_DEEP=...
+
+# 2b) Fallback (optional): Amazon Bedrock bearer token
+# export BEDROCK_API_KEY=<your-key>
 
 # 3) Run — auto-confirms the human gate so a video can show end-to-end
 SHIELD_NHI_NO_PROMPT=1 python agent.py
+```
+
+Check your key and see which Nemotron ids it actually serves:
+
+```bash
+python nhi_models.py        # prints provider, tiers, and GET /v1/models
+```
+
+Verify the Token Factory wiring without spending a key (spins a local OpenAI-compatible
+server and asserts path, bearer auth, model id and payload):
+
+```bash
+python tests/test_token_factory.py     # 14 checks
 ```
 
 **Interactive mode** (real ops — prompts an actual human to approve remediations):
@@ -132,18 +166,35 @@ These require your sign-off:
 ## Repo layout
 
 ```
-agent.py          Strands agent: tools, HumanApprovalGate, BedrockModel wiring
+agent.py          Strands agent: tools, HumanApprovalGate, model wiring
+nhi_models.py     Model layer: Nebius Token Factory (primary) → Bedrock (fallback)
 nhi_engine.py     Risk engine (SDK-free pure logic — discovered/scored NHIs)
+tests/            Wiring proof for the Token Factory runtime call
 requirements.txt  Python deps
 README.md
 LICENSE           (MIT)
 ```
 
+## Significant updates during the submission period
+
+SHIELD-NHI existed before this submission window; this is what was **added** for it:
+
+1. **Inference moved to Nebius Token Factory.** `nhi_models.py` now routes the agent's model
+   through Token Factory's OpenAI-compatible API, serving **NVIDIA Nemotron** open-source models.
+   The previous Bedrock path remains as an explicit fallback provider.
+2. **`explain_risk` — evidence-backed decisions.** Every risk finding can now be justified in
+   plain language from the engine's own evidence, with the serving model id printed in the output.
+3. **Per-task model tiers.** `NEBIUS_MODEL_FAST` / `_REASON` / `_DEEP` let bulk inventory sweeps run
+   on a small model while only the reasoning-heavy calls hit the large one.
+4. **Wiring proof + graceful degradation.** `tests/test_token_factory.py` asserts the real HTTP
+   call (path, bearer auth, model id, payload) against a local stand-in; `explain_risk` returns the
+   deterministic record instead of failing when the API is unreachable.
+
 ## Notes on the demo scope
 
 The discovery connectors currently return a **deterministic mock inventory** (so the demo is
 reproducible). The risk engine, Strands agent, tool loop, and human-in-the-loop gate are all **real
-and run live against Amazon Bedrock** — swap `load_inventory()` in `nhi_engine.py` for your own
-AWS/GitHub/K8s connectors and it governs real NHIs.
+and run live against NVIDIA Nemotron on Nebius Token Factory** — swap `load_inventory()` in
+`nhi_engine.py` for your own AWS/GitHub/K8s connectors and it governs real NHIs.
 
 © 2026 KEBOS · MIT License

@@ -2,3 +2,5 @@
 # Python 3.11
 strands-sdk==10.0.2
 boto3>=1.34
+# Nebius Token Factory / any OpenAI-compatible endpoint (primary inference path)
+openai>=1.40
