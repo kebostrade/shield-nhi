@@ -89,6 +89,21 @@ kills a run and never fabricates an answer.
 - **Amazon Bedrock** — optional fallback provider (bearer token), so the original run path still works
 - **Python 3.11** — agent + risk engine (`nhi_engine.py`, pure logic, unit-testable)
 
+## Live demo (hosted console)
+
+A zero-dependency web console over the **real** risk engine — no mock UI: it loads the
+inventory, scores it with `nhi_engine`, calls Nemotron through Token Factory for the
+"why risky?" explanations, and enforces the same human-approval gate before any
+destructive action:
+
+```bash
+.venv/bin/python webdemo.py --port 8100     # http://localhost:8100
+```
+
+- `GET /api/state` — inventory, scores, reasons, audit trail, provider status
+- `GET /api/explain?id=gh-001` — live Nemotron call (falls back to the deterministic record)
+- `POST /api/remediate` — **refuses with 403 unless `"approved": true`**, then writes the audit entry
+
 ## Run it
 
 ```bash
