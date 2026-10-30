@@ -91,6 +91,8 @@ kills a run and never fabricates an answer.
 
 ## Live demo (hosted console)
 
+**Live URL:** https://atlantic-allows-loans-loves.trycloudflare.com
+
 A zero-dependency web console over the **real** risk engine — no mock UI: it loads the
 inventory, scores it with `nhi_engine`, calls Nemotron through Token Factory for the
 "why risky?" explanations, and enforces the same human-approval gate before any
